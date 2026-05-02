@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // Wizard entry point — either starts a new application or resumes the
 // last in-progress one stored in UserDefaults. Keeps a reference to its
@@ -16,8 +17,8 @@ struct ApplyView: View {
                 FormStepView(step: step, model: model)
             case .submitting:
                 SubmittingView()
-            case .result(let state):
-                ResultView(state: state, model: model)
+            case .result(let decision):
+                ResultView(decision: decision, model: model)
             }
         }
         .animation(.easeInOut(duration: 0.25), value: model.phase)
@@ -30,7 +31,7 @@ final class ApplyWizardModel: ObservableObject {
         case quote                       // amount + term picker
         case form(step: FormStep)
         case submitting
-        case result(state: PesitoAPI.ApplicationState)
+        case result(decision: PesitoAPI.SubmitDecision)
     }
     enum FormStep: Int, CaseIterable, Equatable {
         case identity = 1, address, income, bank, idDocs, otp, review
@@ -72,6 +73,17 @@ final class ApplyWizardModel: ObservableObject {
     @Published var quote: PesitoAPI.PricingSnapshot?
     @Published var error: String?
     @Published var busy = false
+
+    // Document capture state (keyed by 'ine_front' | 'ine_back' | 'selfie').
+    @Published var documents: [String: DocumentState] = [:]
+    struct DocumentState {
+        var thumbnail: UIImage?
+        var uploaded: Bool
+        var statusText: String      // "Subiendo…" / "Listo" / "Error: ..."
+    }
+    var allDocsUploaded: Bool {
+        ["ine_front", "ine_back", "selfie"].allSatisfy { documents[$0]?.uploaded == true }
+    }
 
     func nextStep(from cur: FormStep) {
         if let nxt = FormStep(rawValue: cur.rawValue + 1) { phase = .form(step: nxt) }
@@ -154,8 +166,8 @@ final class ApplyWizardModel: ObservableObject {
         guard let id = applicationId else { return }
         phase = .submitting
         do {
-            let s = try await PesitoAPI.shared.applySubmit(id: id)
-            phase = .result(state: s)
+            let d = try await PesitoAPI.shared.applySubmit(id: id)
+            phase = .result(decision: d)
         } catch let e as NSError {
             error = "No se pudo enviar: \(e.localizedDescription)"
             phase = .form(step: .review)
@@ -169,6 +181,62 @@ final class ApplyWizardModel: ObservableObject {
         firstName = ""; lastName = ""; curp = ""; email = ""; phone = ""
         addressLine = ""; city = ""; state = ""; postalCode = ""
         monthlyIncome = ""; employer = ""; clabe = ""; consents = false; otpCode = ""
+        documents = [:]
+    }
+
+    // Compress an image to ~500KB JPEG and upload to backend.
+    // We bind the *thumbnail* of the resized image into the docs dict so the
+    // capture row can render it without re-loading from disk.
+    func uploadDocument(kind: String, image: UIImage) async {
+        guard let id = applicationId else { return }
+        documents[kind] = DocumentState(thumbnail: thumbnail(image), uploaded: false, statusText: "Subiendo…")
+        // Resize to max 1600px on longest side then compress.
+        let resized = resize(image, maxSide: 1600)
+        guard let jpeg = compress(resized, target: 500_000) else {
+            documents[kind] = DocumentState(thumbnail: thumbnail(image), uploaded: false, statusText: "No se pudo comprimir la foto")
+            return
+        }
+        do {
+            try await PesitoAPI.shared.uploadDocument(applicationId: id, kind: kind, jpeg: jpeg)
+            documents[kind] = DocumentState(thumbnail: thumbnail(image), uploaded: true, statusText: "Listo (\(jpeg.count / 1024) KB)")
+        } catch let e as NSError {
+            documents[kind] = DocumentState(thumbnail: thumbnail(image), uploaded: false, statusText: "Error: \(e.localizedDescription)")
+        }
+    }
+
+    // ── Image helpers ──
+    private func thumbnail(_ img: UIImage) -> UIImage {
+        let target: CGFloat = 120
+        let scale = max(target / img.size.width, target / img.size.height)
+        let size = CGSize(width: img.size.width * scale, height: img.size.height * scale)
+        UIGraphicsBeginImageContextWithOptions(size, false, UIScreen.main.scale)
+        img.draw(in: CGRect(origin: .zero, size: size))
+        let r = UIGraphicsGetImageFromCurrentImageContext() ?? img
+        UIGraphicsEndImageContext()
+        return r
+    }
+    private func resize(_ img: UIImage, maxSide: CGFloat) -> UIImage {
+        let s = max(img.size.width, img.size.height)
+        guard s > maxSide else { return img }
+        let scale = maxSide / s
+        let size = CGSize(width: img.size.width * scale, height: img.size.height * scale)
+        UIGraphicsBeginImageContextWithOptions(size, false, 1)
+        img.draw(in: CGRect(origin: .zero, size: size))
+        let r = UIGraphicsGetImageFromCurrentImageContext() ?? img
+        UIGraphicsEndImageContext()
+        return r
+    }
+    // Iteratively drop JPEG quality until under the target byte count, but
+    // stop before it gets ugly. Real apps use HEIF/HEIC; JPEG keeps backend
+    // mime expectations simple.
+    private func compress(_ img: UIImage, target: Int) -> Data? {
+        var quality: CGFloat = 0.9
+        var data = img.jpegData(compressionQuality: quality)
+        while let d = data, d.count > target, quality > 0.45 {
+            quality -= 0.1
+            data = img.jpegData(compressionQuality: quality)
+        }
+        return data
     }
 }
 
@@ -346,17 +414,7 @@ private struct FormStepView: View {
                 .foregroundColor(PesitoColor.inkSoft)
                 .padding(.horizontal, PesitoSpace.xs)
         case .idDocs:
-            VStack(alignment: .leading, spacing: PesitoSpace.md) {
-                Text("Para tu seguridad necesitamos: foto de tu INE (frente y reverso) y una selfie.")
-                    .font(.pesitoBodyM)
-                    .foregroundColor(PesitoColor.inkSoft)
-                docPlaceholder(label: "INE — frente",  icon: "rectangle.split.2x1")
-                docPlaceholder(label: "INE — reverso", icon: "rectangle.split.2x1.fill")
-                docPlaceholder(label: "Selfie",        icon: "person.fill.viewfinder")
-                Text("La cámara llegará en la próxima versión. Por ahora, continúa: capturaremos los documentos por web.")
-                    .font(.pesitoCaption)
-                    .foregroundColor(PesitoColor.inkMuted)
-            }
+            DocsCaptureView(model: model)
         case .otp:
             VStack(alignment: .leading, spacing: PesitoSpace.md) {
                 Text("Te enviamos un código a \(model.phone). Ingrésalo para confirmar el teléfono.")
@@ -412,6 +470,10 @@ private struct FormStepView: View {
             }
             .buttonStyle(PesitoPrimaryButton())
             .disabled(model.busy)
+        case .idDocs:
+            Button("Continuar") { Task { await model.saveAndAdvance(step) } }
+                .buttonStyle(PesitoPrimaryButton())
+                .disabled(model.busy || !model.allDocsUploaded)
         default:
             Button("Continuar") { Task { await model.saveAndAdvance(step) } }
                 .buttonStyle(PesitoPrimaryButton())
@@ -436,22 +498,6 @@ private struct FormStepView: View {
         }
     }
 
-    @ViewBuilder
-    private func docPlaceholder(label: String, icon: String) -> some View {
-        HStack(spacing: PesitoSpace.md) {
-            Image(systemName: icon)
-                .font(.system(size: 24))
-                .foregroundColor(PesitoColor.inkSoft)
-                .frame(width: 40)
-            Text(label).font(.pesitoBodyM).foregroundColor(PesitoColor.ink)
-            Spacer()
-            Image(systemName: "camera").foregroundColor(PesitoColor.inkMuted)
-        }
-        .padding(PesitoSpace.md)
-        .background(PesitoColor.bgRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(PesitoColor.line, lineWidth: 1))
-    }
 }
 
 // MARK: - Helpers
@@ -483,11 +529,29 @@ private struct SubmittingView: View {
 }
 
 private struct ResultView: View {
-    let state: PesitoAPI.ApplicationState
+    let decision: PesitoAPI.SubmitDecision
     @ObservedObject var model: ApplyWizardModel
     @EnvironmentObject var store: AppStore
 
     var body: some View {
+        // APPROVED → SignOfferView (full sign flow)
+        // REJECTED / MANUAL_REVIEW → terminal status screen
+        if decision.decision == "APPROVED", let appId = model.applicationId, let offer = decision.offer {
+            SignOfferView(
+                applicationId: appId,
+                offerAmount: offer.amount ?? "",
+                offerTerm:   offer.term ?? 0,
+                offerCAT:    offer.cat,
+                offerPaymentAmount: model.quote?.paymentAmount.map { String(format: "%.2f", $0) },
+                offerTotalDue:      model.quote?.totalDue.map { String(format: "%.2f", $0) },
+                model: model
+            )
+        } else {
+            terminal
+        }
+    }
+
+    private var terminal: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: PesitoSpace.lg) {
                 Spacer().frame(height: PesitoSpace.xl)
@@ -498,54 +562,48 @@ private struct ResultView: View {
                 Text(message)
                     .font(.pesitoBodyL)
                     .foregroundColor(PesitoColor.inkSoft)
-
-                if state.status == "APPROVED" || state.status == "SIGNED" {
-                    Button("Ver mi préstamo") {
-                        Task {
-                            try? await store.loadLoans()
-                            model.reset()
-                        }
-                    }
-                    .buttonStyle(PesitoPrimaryButton())
-                } else if state.status == "MANUAL_REVIEW" {
+                if let r = decision.reason, !r.isEmpty {
+                    Text("Motivo: \(r)")
+                        .font(.pesitoBodyS)
+                        .foregroundColor(PesitoColor.inkMuted)
+                        .padding(.top, PesitoSpace.xs)
+                }
+                if decision.decision == "MANUAL_REVIEW" {
                     Text("Te avisaremos por SMS y push en cuanto haya respuesta. Normalmente pocas horas.")
                         .font(.pesitoBodyM)
                         .foregroundColor(PesitoColor.inkSoft)
-                } else if state.status == "REJECTED" {
-                    Button("Volver a solicitar más adelante") { model.reset() }
-                        .buttonStyle(PesitoSecondaryButton())
                 }
+                Button(decision.decision == "REJECTED" ? "Volver más adelante" : "Volver a inicio") {
+                    model.reset()
+                    store.screen = .dashboard
+                }
+                .buttonStyle(PesitoSecondaryButton())
+                .padding(.top, PesitoSpace.md)
                 Spacer()
             }
             .padding(.horizontal, PesitoSpace.xl)
             .padding(.bottom, PesitoSpace.xxl)
         }
     }
+
     private var tint: Color {
-        switch state.status {
-        case "APPROVED", "SIGNED", "DISBURSED": return PesitoColor.success
-        case "REJECTED":                         return PesitoColor.danger
-        default:                                 return PesitoColor.brand
+        switch decision.decision {
+        case "REJECTED": return PesitoColor.danger
+        default:         return PesitoColor.brand
         }
     }
     private var headline: String {
-        switch state.status {
-        case "APPROVED":       return "¡Aprobado!"
-        case "MANUAL_REVIEW":  return "En revisión"
-        case "REJECTED":       return "Por ahora no podemos aprobar"
-        case "SIGNED":         return "Contrato firmado"
-        case "DISBURSED":      return "Dinero en camino"
-        default:               return "Solicitud enviada"
+        switch decision.decision {
+        case "MANUAL_REVIEW": return "En revisión"
+        case "REJECTED":      return "Por ahora no podemos aprobar"
+        default:              return "Solicitud enviada"
         }
     }
     private var message: String {
-        switch state.status {
-        case "APPROVED":       return "Tu préstamo está aprobado. El siguiente paso es firmar el contrato."
-        case "MANUAL_REVIEW":  return "Necesitamos verificar algunos datos. Volvemos contigo en menos de un día."
-        case "REJECTED":       return "Tu perfil no califica en este momento. Puedes intentar de nuevo en 30 días."
-        case "SIGNED":         return "Listo. El depósito SPEI llega en minutos."
-        case "DISBURSED":      return "El SPEI ya salió. Revisa tu cuenta CLABE."
-        default:               return "Procesando…"
+        switch decision.decision {
+        case "MANUAL_REVIEW": return "Necesitamos verificar algunos datos. Volvemos contigo en menos de un día."
+        case "REJECTED":      return "Tu perfil no califica en este momento. Puedes intentar de nuevo en 30 días."
+        default:              return "Procesando…"
         }
     }
 }

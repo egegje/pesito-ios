@@ -72,10 +72,32 @@ actor PesitoAPI {
     struct ApplicationState: Codable {
         let id: String
         let status: String       // DRAFT | SUBMITTED | KYC_PENDING | APPROVED | REJECTED | MANUAL_REVIEW | SIGNED | DISBURSED
-        let amount: String
-        let termCount: Int
-        let termUnit: String
+        let amount: String?
+        let termCount: Int?
+        let termUnit: String?
+        let approvedAmount: String?
+        let approvedTerm: Int?
+        let approvedCAT: String?
+        let approvedFee: String?
+        let approvedRate: String?
+        let pricingSnapshot: PricingSnapshot?
+        let rejectReason: String?
+        let signedAt: String?
         let data: [String: AnyCodable]?
+    }
+    // /apply/:id/submit returns this shape, NOT the full ApplicationState.
+    // Backend sends { decision, reason, offer }
+    struct SubmitDecision: Codable, Equatable {
+        let decision: String     // APPROVED | REJECTED | MANUAL_REVIEW
+        let reason: String?
+        let offer: SubmitOffer?
+        struct SubmitOffer: Codable, Equatable {
+            let amount: String?
+            let term: Int?
+            let cat: String?
+            let fee: String?
+            let dailyRate: String?
+        }
     }
 
     // Loose JSON value — apply form data is dynamic, polished into typed
@@ -152,17 +174,47 @@ actor PesitoAPI {
     func applyOtpVerify(id: String, phone: String, code: String) async throws {
         try await postEmpty("/api/v1/apply/\(id)/otp/verify", body: ["phone": phone, "code": code])
     }
-    func applySubmit(id: String) async throws -> ApplicationState {
+    func applySubmit(id: String) async throws -> SubmitDecision {
         try await postReturning("/api/v1/apply/\(id)/submit", body: [String: String]())
     }
     func applyState(id: String) async throws -> ApplicationState {
         try await get("/api/v1/apply/\(id)")
     }
-    func applySign(id: String, code: String) async throws -> ApplicationState {
-        try await postReturning("/api/v1/apply/\(id)/sign", body: ["code": code])
+    // OTP-based offer signing → backend creates Mifiel doc + auto-creates Loan
+    func applySignStart(id: String) async throws {
+        try await postEmpty("/api/v1/apply/\(id)/sign/start", body: [String: String]())
+    }
+    struct ApplySignResp: Codable { let ok: Bool?; let loanId: String? }
+    func applySignConfirm(id: String, code: String) async throws -> ApplySignResp {
+        try await postReturning("/api/v1/apply/\(id)/sign/confirm", body: ["code": code])
     }
     func applyDisburse(id: String) async throws -> ApplicationState {
         try await postReturning("/api/v1/apply/\(id)/disburse", body: [String: String]())
+    }
+
+    // Multipart document upload (INE front / back / selfie)
+    func uploadDocument(applicationId: String, kind: String, jpeg: Data, mime: String = "image/jpeg") async throws {
+        let boundary = "pesito-" + UUID().uuidString
+        var body = Data()
+        // text field 'kind'
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"kind\"\r\n\r\n".data(using: .utf8)!)
+        body.append("\(kind)\r\n".data(using: .utf8)!)
+        // file field
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(kind).jpg\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: \(mime)\r\n\r\n".data(using: .utf8)!)
+        body.append(jpeg)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+        var req = URLRequest(url: Self.baseURL.appendingPathComponent("/api/v1/apply/\(applicationId)/document"))
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.setValue(Self.tenantHeader, forHTTPHeaderField: "x-tenant")
+        req.httpBody = body
+
+        let (data, resp) = try await session.data(for: req)
+        try check(resp, body: data)
     }
 
     // MARK: - Plumbing

@@ -264,6 +264,12 @@ actor PesitoAPI {
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let snippet = String(data: body.prefix(200), encoding: .utf8) ?? ""
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            // 401 → session expired/missing — surface as a typed error so
+            // AppStore can react (kick to login) instead of showing a raw
+            // backend message.
+            if code == 401 || code == 403 {
+                throw PesitoError.sessionExpired
+            }
             throw NSError(domain: "PesitoAPI", code: code,
                           userInfo: [NSLocalizedDescriptionKey: snippet])
         }
@@ -271,4 +277,15 @@ actor PesitoAPI {
 
     // Default tenant — until we resolve via host header. Mexico-only for V0.
     static let tenantHeader = "mx"
+}
+
+// Typed errors thrown by PesitoAPI so callers can switch on intent rather
+// than parsing strings or status codes.
+enum PesitoError: LocalizedError {
+    case sessionExpired
+    var errorDescription: String? {
+        switch self {
+        case .sessionExpired: return "Sesión expirada"
+        }
+    }
 }

@@ -134,6 +134,8 @@ struct SignOfferView: View {
             try await PesitoAPI.shared.applySignStart(id: applicationId)
             phase = .signing
             startResendTimer()
+        } catch PesitoError.sessionExpired {
+            await store.handleSessionExpired()
         } catch let e as NSError {
             error = "No se pudo enviar el código: \(e.localizedDescription)"
         }
@@ -150,6 +152,8 @@ struct SignOfferView: View {
             try? await store.loadLoans()
             store.screen = .dashboard
             model.reset()
+        } catch PesitoError.sessionExpired {
+            await store.handleSessionExpired()
         } catch let e as NSError {
             error = "Código incorrecto: \(e.localizedDescription)"
         }

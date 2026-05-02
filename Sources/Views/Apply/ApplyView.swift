@@ -6,6 +6,7 @@ import UIKit
 // own ApplyWizardModel which talks to PesitoAPI.
 struct ApplyView: View {
     @StateObject private var model = ApplyWizardModel()
+    @EnvironmentObject var store: AppStore
 
     var body: some View {
         ZStack {
@@ -22,6 +23,13 @@ struct ApplyView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: model.phase)
+        .onChange(of: model.sessionExpired) { _, expired in
+            if expired {
+                Task { await store.handleSessionExpired() }
+                model.sessionExpired = false
+                model.reset()
+            }
+        }
     }
 }
 
@@ -73,6 +81,9 @@ final class ApplyWizardModel: ObservableObject {
     @Published var quote: PesitoAPI.PricingSnapshot?
     @Published var error: String?
     @Published var busy = false
+    // Set to true by any catch block that observed PesitoError.sessionExpired.
+    // ApplyView observes and asks AppStore to bounce to login.
+    @Published var sessionExpired: Bool = false
 
     // Document capture state (keyed by 'ine_front' | 'ine_back' | 'selfie').
     @Published var documents: [String: DocumentState] = [:]
@@ -102,6 +113,8 @@ final class ApplyWizardModel: ObservableObject {
             applicationId = r.applicationId
             quote = r.pricingSnapshot
             phase = .form(step: .identity)
+        } catch PesitoError.sessionExpired {
+            sessionExpired = true
         } catch let e as NSError {
             error = "No se pudo iniciar: \(e.localizedDescription)"
         }
@@ -133,6 +146,8 @@ final class ApplyWizardModel: ObservableObject {
                 try await PesitoAPI.shared.applyData(id: id, patch: patch)
             }
             nextStep(from: step)
+        } catch PesitoError.sessionExpired {
+            sessionExpired = true
         } catch let e as NSError {
             error = "Error guardando: \(e.localizedDescription)"
         }
@@ -144,6 +159,8 @@ final class ApplyWizardModel: ObservableObject {
         busy = true; error = nil
         do {
             try await PesitoAPI.shared.applyOtpSend(id: id, phone: phone)
+        } catch PesitoError.sessionExpired {
+            sessionExpired = true
         } catch let e as NSError {
             error = "No se envió el código: \(e.localizedDescription)"
         }
@@ -157,6 +174,8 @@ final class ApplyWizardModel: ObservableObject {
             // Persist consents flag too (required server-side)
             try await PesitoAPI.shared.applyData(id: id, patch: ["consents": consents])
             nextStep(from: .otp)
+        } catch PesitoError.sessionExpired {
+            sessionExpired = true
         } catch let e as NSError {
             error = "Código incorrecto: \(e.localizedDescription)"
         }
@@ -168,6 +187,8 @@ final class ApplyWizardModel: ObservableObject {
         do {
             let d = try await PesitoAPI.shared.applySubmit(id: id)
             phase = .result(decision: d)
+        } catch PesitoError.sessionExpired {
+            sessionExpired = true
         } catch let e as NSError {
             error = "No se pudo enviar: \(e.localizedDescription)"
             phase = .form(step: .review)
@@ -199,6 +220,8 @@ final class ApplyWizardModel: ObservableObject {
         do {
             try await PesitoAPI.shared.uploadDocument(applicationId: id, kind: kind, jpeg: jpeg)
             documents[kind] = DocumentState(thumbnail: thumbnail(image), uploaded: true, statusText: "Listo (\(jpeg.count / 1024) KB)")
+        } catch PesitoError.sessionExpired {
+            sessionExpired = true
         } catch let e as NSError {
             documents[kind] = DocumentState(thumbnail: thumbnail(image), uploaded: false, statusText: "Error: \(e.localizedDescription)")
         }

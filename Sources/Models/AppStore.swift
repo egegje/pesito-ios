@@ -40,7 +40,23 @@ final class AppStore: ObservableObject {
         }
     }
     func loadLoans() async throws {
-        loans = try await PesitoAPI.shared.loans()
+        do {
+            loans = try await PesitoAPI.shared.loans()
+        } catch PesitoError.sessionExpired {
+            await handleSessionExpired()
+            throw PesitoError.sessionExpired
+        }
+    }
+
+    // Centralised "session expired" handling — wipe local state and bounce
+    // the user to login. Any view layer caller that catches a thrown error
+    // from a PesitoAPI call should let it propagate; the .task that owns
+    // the call observes screen change reactively.
+    func handleSessionExpired() async {
+        me = nil
+        loans = []
+        error = "Tu sesión expiró. Vuelve a iniciar sesión."
+        screen = .login(phone: "")
     }
 
     func sendOtp(phone: String) async {
@@ -64,7 +80,11 @@ final class AppStore: ObservableObject {
         do {
             try await PesitoAPI.shared.pay(loanId: loanId, amount: amount, method: method)
             try await loadLoans()
-        } catch { self.error = "No se pudo procesar el pago" }
+        } catch PesitoError.sessionExpired {
+            await handleSessionExpired()
+        } catch {
+            self.error = "No se pudo procesar el pago"
+        }
         isBusy = false
     }
     func logout() async {

@@ -1,0 +1,18 @@
+## Xcode generated
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+.swiftpm/
+.build/
+
+## macOS
+.DS_Store
+
+## Secrets / local
+*.local
+.env
+
+## XcodeGen output (regenerate locally)
+pesito.xcodeproj

@@ -1,0 +1,36 @@
+name: pesito
+options:
+  bundleIdPrefix: je.eg.pesito
+  deploymentTarget:
+    iOS: '17.0'
+settings:
+  base:
+    DEVELOPMENT_TEAM: ''
+    SWIFT_VERSION: '5.10'
+    MARKETING_VERSION: '0.1.0'
+    CURRENT_PROJECT_VERSION: '1'
+targets:
+  pesito:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: pesito
+        CFBundleName: pesito
+        UILaunchScreen:
+          UIColorName: ''
+          UIImageName: ''
+        UIRequiresFullScreen: NO
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: NO
+          NSExceptionDomains:
+            gaz.eg.je:
+              NSIncludesSubdomains: YES
+              NSTemporaryExceptionAllowsInsecureHTTPLoads: NO
+        ITSAppUsesNonExemptEncryption: NO
